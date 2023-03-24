@@ -32,11 +32,19 @@ class HasTVars a where
 
 -- | Type variables of a type
 instance HasTVars Type where
-  freeTVars t     = error "TBD: type freeTVars"
+  freeTVars t     = case t of
+    TInt      -> []
+    TBool     -> []
+    t1 :=> t2 -> if ((freeTVars t1) /= (freeTVars t2)) then ((freeTVars t1) ++ (freeTVars t2)) 
+                  else (freeTVars t2)
+    TVar tv    -> [tv]
+    TList t1   -> freeTVars t1
 
 -- | Free type variables of a poly-type (remove forall-bound vars)
 instance HasTVars Poly where
-  freeTVars s     = error "TBD: poly freeTVars"
+  freeTVars s     = case s of
+    Mono t1         -> freeTVars t1
+    Forall tv ply   -> freeTVars ply L.\\ [tv]
 
 -- | Free type variables of a type environment
 instance HasTVars TypeEnv where
@@ -56,11 +64,13 @@ extendTypeEnv x s gamma = (x,s) : gamma
 -- | Lookup a type variable in a substitution;
 --   if not present, return the variable unchanged
 lookupTVar :: TVar -> Subst -> Type
-lookupTVar a sub = error "TBD: lookupTVar"
+lookupTVar a []                   = (TVar a)
+lookupTVar a ((b, t) : next) = if (a == b) then t
+                                else (lookupTVar a next)
 
 -- | Remove a type variable from a substitution
 removeTVar :: TVar -> Subst -> Subst
-removeTVar a sub = error "TBD: removeTVar"
+removeTVar a sub = sub L.\\ ((a, (lookupTVar a sub)) : [])
      
 -- | Things to which type substitutions can be apply
 class Substitutable a where
@@ -68,11 +78,18 @@ class Substitutable a where
   
 -- | Apply substitution to type
 instance Substitutable Type where  
-  apply sub t         = error "TBD: type apply"
+  apply sub t         = case t of
+    TInt              -> t
+    TBool             -> t 
+    t1 :=> t2         -> ((apply sub t1) :=> (apply sub t2))
+    TVar tv           -> (lookupTVar tv sub)
+    TList t1          -> (TList (apply sub t1))
 
 -- | Apply substitution to poly-type
 instance Substitutable Poly where    
-  apply sub s         = error "TBD: poly apply"
+  apply sub s         = case s of
+    Mono t1           -> (Mono (apply sub t1))
+    Forall tv ply     -> (Forall tv (apply sub ply))
 
 -- | Apply substitution to (all poly-types in) another substitution
 instance Substitutable Subst where  
@@ -88,7 +105,13 @@ instance Substitutable TypeEnv where
       
 -- | Extend substitution with a new type assignment
 extendSubst :: Subst -> TVar -> Type -> Subst
-extendSubst sub a t = error "TBD: extendSubst"
+extendSubst sub a t = 
+  let
+      ext s sub'      = case sub' of
+        []                -> []
+        ((tv, t) : next)  -> ((tv, apply s t) : []) ++ (ext s next)
+        _                 -> throw (Error ("Error: type error extendSubst"))
+    in (a, apply sub t) : (ext ((a, apply sub t) : []) sub)
       
 --------------------------------------------------------------------------------
 -- Problem 2: Unification
@@ -113,24 +136,121 @@ extendState (InferState sub n) a t = InferState (extendSubst sub a t) n
 -- | Unify a type variable with a type; 
 --   if successful return an updated state, otherwise throw an error
 unifyTVar :: InferState -> TVar -> Type -> InferState
-unifyTVar st a t = error "TBD: unifyTVar"
+unifyTVar st a t = case t of
+  TVar a          -> st
+  _               -> if(L.elem a (freeTVars t) /= True) then (extendState st a t)
+                    else throw (Error ("type error: cannot unify " ++ a ++ " and " ++ (show t) ++ " (occurs check)"))
     
 -- | Unify two types;
 --   if successful return an updated state, otherwise throw an error
 unify :: InferState -> Type -> Type -> InferState
-unify st t1 t2 = error "TBD: unify"
+unify st (TInt) (TBool)       = throw (Error ("type error: cannot unify Int and Bool"))
+
+unify st t1 t2 = case t1 of
+  (TInt)      -> case t2 of
+      (TInt)      -> st
+      (TVar id)   -> unifyTVar st id t1
+      _               -> throw (Error ("type error in unify"))
+  (TBool)     -> case t2 of
+      (TBool)         -> st
+      (TVar id)       -> unifyTVar st id t1
+      _               -> throw (Error ("type error in unify"))
+  (t1a :=> t1b) -> case t2 of
+      (t1a' :=> t1b') -> st'
+        where
+          InferState sub cnt  = unify st t1a t1a'
+          (tx, tx2)           = (apply sub t1b, apply sub t1b')
+          st'                 = unify (InferState sub cnt) tx tx2
+      (TVar id)       -> unifyTVar st id t1
+      _               -> throw (Error ("type error in unify"))
+
+  (TVar id)   -> unifyTVar st id t2
+
+  (TList ty)  -> case t2 of
+      (TList ty')     -> unify st ty ty'
+      (TVar id)       -> unifyTVar st id t1
+      _               -> throw (Error ("type error in unify"))
+
+  _             -> throw (Error ("type error in unify"))
+
 
 --------------------------------------------------------------------------------
 -- Problem 3: Type Inference
 --------------------------------------------------------------------------------    
   
 infer :: InferState -> TypeEnv -> Expr -> (InferState, Type)
-infer st _   (EInt _)          = error "TBD: infer EInt"
-infer st _   (EBool _)         = error "TBD: infer EBool"
-infer st gamma (EVar x)        = error "TBD: infer EVar"
-infer st gamma (ELam x body)   = error "TBD: infer ELam"
-infer st gamma (EApp e1 e2)    = error "TBD: infer EApp"
-infer st gamma (ELet x e1 e2)  = error "TBD: infer ELet"
+infer st _   (EInt _)          = (st, TInt)
+infer st _   (EBool _)         = (st, TBool)
+infer st gamma (EVar x)        = 
+  let
+    fCount          = fst (instantiate (stCnt st) ply)
+      where
+        ply               = lookupVarType x gamma
+    t1              = snd (instantiate (stCnt st) ply)
+      where
+        ply               = lookupVarType x gamma
+    st'             = InferState (stSub st) fCount
+  in (st', t1)
+infer st gamma (ELam x body)   = 
+  let
+    st'             = fst(infer st'' gamma' body)
+      where
+        st''              = InferState (stSub st) ((stCnt st) + 1)
+        gamma'            = extendTypeEnv x (Mono t1') gamma
+          where 
+            t1'              = freshTV (stCnt st)
+    t1              = apply (stSub st') t1'
+      where
+        t1'               = freshTV (stCnt st)
+    body'           = snd(infer st'' gamma' body)
+      where
+        st''              = InferState (stSub st) ((stCnt st) + 1)
+        gamma'            = extendTypeEnv x (Mono t1') gamma
+          where
+            t1'              = freshTV (stCnt st)
+  in (st', t1 :=> body')
+infer st gamma (EApp e1 e2)    = 
+  let
+    st2             = fst (infer st1 gamma' e2)
+      where
+        st1               = fst (infer st gamma e1)
+        gamma'            = apply (stSub st1) gamma
+    st0             = unify st3 te1 (te2 :=> t1')
+      where
+        st3               = InferState (stSub st2) (stCnt st2 + 1)
+        te1               = snd (infer st gamma e1)
+        te2               = snd (infer st1 gamma' e2)
+          where
+            st1             = fst (infer st gamma e1)
+            gamma'          = apply (stSub st1) gamma
+        t1'               = (freshTV (stCnt st2))
+    t1              = apply (stSub st0) t1'
+      where
+        t1'               = (freshTV (stCnt st2))
+  in (st0, t1)
+infer st gamma (ELet x e1 e2)  = 
+  let
+    t1b             = generalize gamma' t1a
+      where
+        gamma'          = apply (stSub st1) gamma
+          where
+            st1             = fst (infer st gamma e1)
+        t1a             = snd (infer st gamma e1)
+    st0             = fst (infer st1 gamma'' e2)
+      where
+        st1             = fst (infer st gamma e1)
+        gamma''         = extendTypeEnv x t1b gamma'
+          where
+            st1             = fst (infer st gamma e1)
+            gamma'          = apply (stSub st1) gamma
+    t1             = snd (infer st1 gamma'' e2)
+      where
+        st1             = fst (infer st gamma e1)
+        gamma''         = extendTypeEnv x t1b gamma'
+          where
+            st1             = fst (infer st gamma e1)
+            gamma'          = apply (stSub st1) gamma
+  in (st0, t1)
 infer st gamma (EBin op e1 e2) = infer st gamma asApp
   where
     asApp = EApp (EApp opVar e1) e2
@@ -143,29 +263,48 @@ infer st gamma ENil = infer st gamma (EVar "[]")
 
 -- | Generalize type variables inside a type
 generalize :: TypeEnv -> Type -> Poly
-generalize gamma t = error "TBD: generalize"
+generalize gamma t = 
+  let t1 = freeTVars t L.\\ (freeTVars gamma)
+  in generalizeH t1
+    where
+      generalizeH t1 = case t1 of
+        []            -> Mono t
+        (x:xs)        -> Forall x (generalizeH xs)
     
 -- | Instantiate a polymorphic type into a mono-type with fresh type variables
 instantiate :: Int -> Poly -> (Int, Type)
-instantiate n s = error "TBD: instantiate"
+instantiate n s = 
+  let t1 = (InferState [] n)
+  in instH t1 s
+    where
+      instH t1' s' = case s' of
+        Mono m        -> (stc, apply (stSub t1') m)
+          where
+            stc       = stCnt t1'
+        Forall tv t   -> instH (InferState sts (stc + 1)) t
+          where
+            ftv = freshTV (stCnt t1')
+            extState  = extendState t1' tv (ftv)
+            sts       = stSub extState
+            stc       = stCnt t1'
       
 -- | Types of built-in operators and functions      
 preludeTypes :: TypeEnv
 preludeTypes =
-  [ ("+",    Mono $ TInt :=> TInt :=> TInt)
-  , ("-",    error "TBD: -")
-  , ("*",    error "TBD: *")
-  , ("/",    error "TBD: /")
-  , ("==",   error "TBD: ==")
-  , ("!=",   error "TBD: !=")
-  , ("<",    error "TBD: <")
-  , ("<=",   error "TBD: <=")
-  , ("&&",   error "TBD: &&")
-  , ("||",   error "TBD: ||")
-  , ("if",   error "TBD: if")
+  [ ("+",    Mono $ TInt          :=> TInt          :=> TInt)
+  , ("-",    Mono $ TInt          :=> TInt          :=> TInt)
+  , ("*",    Mono $ TInt          :=> TInt          :=> TInt)
+  , ("/",    Mono $ TInt          :=> TInt          :=> TInt)
+  , ("==",   Mono $ (TVar "tv0")  :=> (TVar "tv0")  :=> TBool)
+  , ("!=",   Mono $ (TVar "tv1")  :=> (TVar "tv1")  :=> TBool)
+  , ("<",    Mono $ TInt          :=> TInt          :=> TBool)
+  , ("<=",   Mono $ TInt          :=> TInt          :=> TBool)
+  , ("&&",   Mono $ TBool         :=> TBool         :=> TBool)
+  , ("||",   Mono $ TBool         :=> TBool         :=> TBool)
+  , ("if",   Mono $ TBool)
   -- lists: 
-  , ("[]",   error "TBD: []")
-  , (":",    error "TBD: :")
-  , ("head", error "TBD: head")
-  , ("tail", error "TBD: tail")
+  , ("[]",   Mono $ (TVar "tv2")        :=> TList (TVar "tv2"))
+  , (":",    Mono $ (TVar "tv3")        :=> TList (TVar "tv3")    :=> TList (TVar "tv3"))
+  , ("head", Mono $ TList (TVar "tv4")  :=> (TVar "tv4"))
+  , ("tail", Mono $ TList (TVar "tv5")  :=> TList (TVar "tv5"))
   ]
